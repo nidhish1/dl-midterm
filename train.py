@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import torch
@@ -180,6 +181,16 @@ def main() -> None:
     print(f"load best model: {args.load_best_model_at_end}")
 
     trainer.train()
+    final_eval_metrics = trainer.evaluate()
+    print("final eval metrics:")
+    for k, v in sorted(final_eval_metrics.items()):
+        print(f"  {k}: {v}")
+
+    metrics_path = args.output_dir / "final_eval_metrics.json"
+    with metrics_path.open("w", encoding="utf-8") as f:
+        json.dump(final_eval_metrics, f, indent=2, sort_keys=True)
+    print(f"saved final eval metrics to {metrics_path}")
+
     trainer.save_model(str(args.output_dir / "final_adapter"))
     tokenizer.save_pretrained(str(args.output_dir / "final_adapter"))
 
