@@ -128,6 +128,19 @@ def main() -> None:
     )
     ap.add_argument("--limit", type=int, default=0, help="Only first N examples.")
     ap.add_argument(
+        "--num_shards",
+        type=int,
+        default=1,
+        help="Split test.jsonl by line index i: keep lines where i %% num_shards == shard_index. "
+        "Run 4 jobs with shard_index 0..3 and different CUDA_VISIBLE_DEVICES to use all GPUs.",
+    )
+    ap.add_argument(
+        "--shard_index",
+        type=int,
+        default=0,
+        help="This worker's shard (0 .. num_shards-1).",
+    )
+    ap.add_argument(
         "--log_every_candidates",
         type=int,
         default=250,
@@ -137,6 +150,10 @@ def main() -> None:
 
     if args.num_candidates < 1:
         raise ValueError("--num_candidates must be >= 1")
+    if args.num_shards < 1:
+        raise ValueError("--num_shards must be >= 1")
+    if not (0 <= args.shard_index < args.num_shards):
+        raise ValueError("--shard_index must satisfy 0 <= shard_index < num_shards")
 
     candidates_path = args.candidates_out
     if args.num_candidates > 1 and candidates_path is None:
@@ -187,17 +204,27 @@ def main() -> None:
 
     with args.test_jsonl.open("r", encoding="utf-8") as _cf:
         n_lines_in_file = sum(1 for _ in _cf)
-    n_prompts_target = min(n_lines_in_file, args.limit) if args.limit else n_lines_in_file
+
+    cap = min(n_lines_in_file, args.limit) if args.limit else n_lines_in_file
+    if args.num_shards > 1:
+        n_prompts_target = sum(1 for i in range(cap) if i % args.num_shards == args.shard_index)
+        log(
+            f"sharding: num_shards={args.num_shards} shard_index={args.shard_index} "
+            f"cap_lines={cap} this_shard_prompts={n_prompts_target}"
+        )
+    else:
+        n_prompts_target = cap
+
     if args.num_candidates > 1:
         expected_cand_lines = n_prompts_target * args.num_candidates
         log(
-            f"dataset: prompts_in_file={n_lines_in_file} will_process={n_prompts_target} "
+            f"dataset: prompts_in_file={n_lines_in_file} cap={cap} will_process_this_run={n_prompts_target} "
             f"num_candidates={args.num_candidates} expected_candidate_lines={expected_cand_lines}"
         )
     else:
         log(
-            f"dataset: prompts_in_file={n_lines_in_file} will_process={n_prompts_target} "
-            f"(submission rows expected={n_prompts_target})"
+            f"dataset: prompts_in_file={n_lines_in_file} cap={cap} will_process_this_run={n_prompts_target} "
+            f"(submission csv rows this run={n_prompts_target})"
         )
 
     log(f"torch={torch.__version__} cuda={torch.version.cuda} cuda_avail={torch.cuda.is_available()}")
@@ -328,10 +355,16 @@ def main() -> None:
                     f"overall_lines/s={wrote_cand / max(elapsed, 1e-6):.2f}"
                 )
 
+        line_idx = 0
         for line in f_in:
-            if args.limit and total >= args.limit:
+            if args.limit and line_idx >= args.limit:
                 break
-            batch.append(json.loads(line))
+            row_obj = json.loads(line)
+            if args.num_shards > 1 and line_idx % args.num_shards != args.shard_index:
+                line_idx += 1
+                continue
+            batch.append(row_obj)
+            line_idx += 1
             total += 1
 
             if len(batch) >= args.batch_size:
