@@ -127,6 +127,12 @@ def main() -> None:
         help="Run svg_canonicalizer after extract (optional; usually do this in post-process).",
     )
     ap.add_argument("--limit", type=int, default=0, help="Only first N examples.")
+    ap.add_argument(
+        "--log_every_candidates",
+        type=int,
+        default=250,
+        help="When writing candidates JSONL, log progress every N lines (0 = only per-batch + final).",
+    )
     args = ap.parse_args()
 
     if args.num_candidates < 1:
@@ -179,6 +185,21 @@ def main() -> None:
     if not args.test_jsonl.exists():
         raise FileNotFoundError(f"Missing test_jsonl: {args.test_jsonl}")
 
+    with args.test_jsonl.open("r", encoding="utf-8") as _cf:
+        n_lines_in_file = sum(1 for _ in _cf)
+    n_prompts_target = min(n_lines_in_file, args.limit) if args.limit else n_lines_in_file
+    if args.num_candidates > 1:
+        expected_cand_lines = n_prompts_target * args.num_candidates
+        log(
+            f"dataset: prompts_in_file={n_lines_in_file} will_process={n_prompts_target} "
+            f"num_candidates={args.num_candidates} expected_candidate_lines={expected_cand_lines}"
+        )
+    else:
+        log(
+            f"dataset: prompts_in_file={n_lines_in_file} will_process={n_prompts_target} "
+            f"(submission rows expected={n_prompts_target})"
+        )
+
     log(f"torch={torch.__version__} cuda={torch.version.cuda} cuda_avail={torch.cuda.is_available()}")
     if torch.cuda.is_available():
         log(f"gpu={torch.cuda.get_device_name(0)}")
@@ -208,9 +229,11 @@ def main() -> None:
     total = 0
     wrote_csv = 0
     wrote_cand = 0
+    prompts_flushed = 0
     n_extract_fallback = 0
     n_canon_fallback = 0
     start = time.time()
+    last_cand_log_milestone = 0
 
     csv_file = None
     csv_writer = None
@@ -229,11 +252,14 @@ def main() -> None:
         batch: list[dict] = []
 
         def flush_batch(rows: list[dict]) -> None:
-            nonlocal wrote_csv, wrote_cand, n_extract_fallback, n_canon_fallback
+            nonlocal wrote_csv, wrote_cand, prompts_flushed, n_extract_fallback, n_canon_fallback
+            nonlocal last_cand_log_milestone
             if not rows:
                 return
             prompts = [r["prompt"] for r in rows]
+            batch_t0 = time.time()
             for k in range(args.num_candidates):
+                k_t0 = time.time()
                 comps = run_generate(
                     model,
                     tok,
@@ -265,15 +291,42 @@ def main() -> None:
                             + "\n"
                         )
                         wrote_cand += 1
+                        if args.log_every_candidates > 0 and wrote_cand - last_cand_log_milestone >= args.log_every_candidates:
+                            last_cand_log_milestone = wrote_cand
+                            elapsed = time.time() - start
+                            exp = n_prompts_target * args.num_candidates
+                            pct = 100.0 * wrote_cand / max(exp, 1)
+                            log(
+                                f"[candidates] lines={wrote_cand}/{exp} ({pct:.1f}%) "
+                                f"lines/s={wrote_cand / max(elapsed, 1e-6):.2f} "
+                                f"prompts_done~={wrote_cand // max(args.num_candidates, 1)}/{n_prompts_target} "
+                                f"extract_fb={n_extract_fallback} canon_fb={n_canon_fallback}"
+                            )
 
                     if args.num_candidates == 1 and csv_writer is not None and k == 0:
                         csv_writer.writerow({"id": r["id"], "svg": svg})
                         wrote_csv += 1
 
+                if args.num_candidates > 1:
+                    log(
+                        f"[candidates] finished candidate_idx={k + 1}/{args.num_candidates} "
+                        f"for_batch={len(rows)} prompts gen_step_sec={time.time() - k_t0:.2f}"
+                    )
+
+            prompts_flushed += len(rows)
             if csv_file:
                 csv_file.flush()
             if cand_file:
                 cand_file.flush()
+
+            if args.num_candidates > 1 and cand_file is not None:
+                elapsed = time.time() - start
+                exp = n_prompts_target * args.num_candidates
+                log(
+                    f"[candidates] batch_done prompts_total={prompts_flushed}/{n_prompts_target} "
+                    f"lines_total={wrote_cand}/{exp} batch_wall_sec={time.time() - batch_t0:.2f} "
+                    f"overall_lines/s={wrote_cand / max(elapsed, 1e-6):.2f}"
+                )
 
         for line in f_in:
             if args.limit and total >= args.limit:
@@ -285,9 +338,10 @@ def main() -> None:
                 flush_batch(batch)
                 batch = []
                 if wrote_csv and wrote_csv % 1000 == 0 and args.num_candidates == 1:
-                    log(f"csv progress wrote_csv={wrote_csv} rows/s={wrote_csv / max(time.time() - start, 1e-6):.2f}")
-                if wrote_cand and wrote_cand % 5000 == 0 and cand_file:
-                    log(f"cand progress lines={wrote_cand} ...")
+                    log(
+                        f"[submission] csv_rows={wrote_csv}/{n_prompts_target} "
+                        f"rows/s={wrote_csv / max(time.time() - start, 1e-6):.2f}"
+                    )
 
         flush_batch(batch)
         f_in.close()
@@ -300,10 +354,13 @@ def main() -> None:
 
     elapsed = time.time() - start
     log("=== done ===")
+    exp_cand = n_prompts_target * args.num_candidates if args.num_candidates > 1 else n_prompts_target
+    rate = (wrote_cand if args.num_candidates > 1 else wrote_csv) / max(elapsed, 1e-6)
     log(
-        f"examples_read={total} csv_rows={wrote_csv} candidate_lines={wrote_cand} "
+        f"examples_read={total} prompts_target={n_prompts_target} "
+        f"csv_rows={wrote_csv} candidate_lines={wrote_cand} expected_lines={exp_cand} "
         f"extract_fallback={n_extract_fallback} canon_fallback={n_canon_fallback} "
-        f"sec={elapsed:.1f}"
+        f"sec={elapsed:.1f} throughput_lines_or_rows_per_sec={rate:.2f}"
     )
 
 
