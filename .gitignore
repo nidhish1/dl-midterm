@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data / outputs (large)
+dl-spring-2026-svg-generation/
+sft_sft_data/
+runs/
+*.csv
+*.jsonl
+svg_sample_compare.html
