@@ -54,7 +54,14 @@ def main() -> None:
         "--out_dir",
         type=Path,
         default=_DEFAULT_OUT_DIR,
-        help=f"Directory for train.jsonl and val.jsonl (default: {_DEFAULT_OUT_DIR})",
+        help=f"Output directory (default: {_DEFAULT_OUT_DIR})",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["train_val", "test"],
+        default="train_val",
+        help="train_val: write train.jsonl + val.jsonl. test: write single test.jsonl.",
     )
     parser.add_argument("--val_frac", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=42)
@@ -64,6 +71,12 @@ def main() -> None:
     rows = load_rows(args.input_csv)
     if not rows:
         raise ValueError("No valid rows found.")
+
+    if args.mode == "test":
+        write_jsonl(out_dir / "test.jsonl", rows)
+        print(f"Total rows: {len(rows)}")
+        print(f"Wrote: {out_dir / 'test.jsonl'}")
+        return
 
     rng = random.Random(args.seed)
     rng.shuffle(rows)

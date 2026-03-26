@@ -21,7 +21,7 @@ Writes `sft_sft_data/train.jsonl` and `sft_sft_data/val.jsonl` by default:
 
 ```bash
 cd /Users/mudrex/Desktop/dl-midterm-2
-python3 util/csv_to_sft_jsonl.py --input_csv dl-spring-2026-svg-generation/train_canonicsed.csv
+python3 util/csv_to_sft_jsonl.py --input_csv dl-spring-2026-svg-generation/test_canonicsed.csv
 ```
 
 ## Compare random samples (train vs canonicalised)
