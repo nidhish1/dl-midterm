@@ -40,6 +40,29 @@ def load_rows(csv_path: Path) -> list[dict]:
     return rows
 
 
+def load_test_prompts(csv_path: Path) -> list[dict]:
+    rows = []
+    with csv_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        required = {"id", "prompt"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+        for row in reader:
+            rid = (row.get("id") or "").strip()
+            prompt = (row.get("prompt") or "").strip()
+            if not rid or not prompt:
+                continue
+            rows.append(
+                {
+                    "id": rid,
+                    "prompt": PROMPT_TEMPLATE.format(description=prompt),
+                }
+            )
+    return rows
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -68,15 +91,18 @@ def main() -> None:
     args = parser.parse_args()
 
     out_dir = args.out_dir.expanduser().resolve()
-    rows = load_rows(args.input_csv)
-    if not rows:
-        raise ValueError("No valid rows found.")
-
     if args.mode == "test":
+        rows = load_test_prompts(args.input_csv)
+        if not rows:
+            raise ValueError("No valid rows found.")
         write_jsonl(out_dir / "test.jsonl", rows)
         print(f"Total rows: {len(rows)}")
         print(f"Wrote: {out_dir / 'test.jsonl'}")
         return
+
+    rows = load_rows(args.input_csv)
+    if not rows:
+        raise ValueError("No valid rows found.")
 
     rng = random.Random(args.seed)
     rng.shuffle(rows)
