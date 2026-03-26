@@ -1,6 +1,4 @@
 import argparse
-import json
-import os
 from pathlib import Path
 
 import torch
@@ -73,6 +71,9 @@ def main() -> None:
     parser.add_argument("--eval_steps", type=int, default=200)
     parser.add_argument("--save_steps", type=int, default=200)
     parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--run_name", type=str, default="svg_sft")
+    parser.add_argument("--report_to", type=str, default="none")
+    parser.add_argument("--load_best_model_at_end", action="store_true")
 
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lora_r", type=int, default=16)
@@ -84,6 +85,10 @@ def main() -> None:
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    logging_dir = args.output_dir / "logs"
+
+    if args.load_best_model_at_end and (args.save_steps % args.eval_steps != 0):
+        raise ValueError("--save_steps must be a multiple of --eval_steps when --load_best_model_at_end is enabled.")
 
     dtype, use_bf16, use_fp16 = pick_dtype()
 
@@ -126,6 +131,8 @@ def main() -> None:
 
     training_args = SFTConfig(
         output_dir=str(args.output_dir),
+        run_name=args.run_name,
+        logging_dir=str(logging_dir),
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
@@ -134,11 +141,16 @@ def main() -> None:
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         logging_steps=args.logging_steps,
+        logging_first_step=True,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        save_safetensors=True,
+        load_best_model_at_end=args.load_best_model_at_end,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         seed=args.seed,
         bf16=use_bf16,
         fp16=use_fp16,
@@ -146,7 +158,7 @@ def main() -> None:
         max_length=args.max_length,
         packing=False,
         completion_only_loss=True,
-        report_to="none",
+        report_to=args.report_to,
         remove_unused_columns=True,
     )
 
@@ -163,6 +175,9 @@ def main() -> None:
     print(f"eval rows : {len(eval_ds)}")
     print(f"train_jsonl rows on disk: {count_jsonl_rows(args.train_jsonl)}")
     print(f"val_jsonl rows on disk  : {count_jsonl_rows(args.val_jsonl)}")
+    print(f"checkpoints dir: {args.output_dir}")
+    print(f"logging dir    : {logging_dir}")
+    print(f"load best model: {args.load_best_model_at_end}")
 
     trainer.train()
     trainer.save_model(str(args.output_dir / "final_adapter"))
@@ -173,3 +188,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
