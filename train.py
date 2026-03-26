@@ -1,4 +1,5 @@
 import argparse
+import inspect
 import json
 from pathlib import Path
 
@@ -50,6 +51,54 @@ def count_jsonl_rows(path: Path) -> int:
         return sum(1 for _ in f)
 
 
+def build_sft_config_kwargs(args, logging_dir: Path, use_bf16: bool, use_fp16: bool) -> dict:
+    """Build kwargs compatible with the installed TRL version."""
+    kwargs = {
+        "output_dir": str(args.output_dir),
+        "run_name": args.run_name,
+        "logging_dir": str(logging_dir),
+        "learning_rate": args.learning_rate,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "logging_steps": args.logging_steps,
+        "logging_first_step": True,
+        "eval_steps": args.eval_steps,
+        "save_steps": args.save_steps,
+        "save_total_limit": args.save_total_limit,
+        "load_best_model_at_end": args.load_best_model_at_end,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+        "seed": args.seed,
+        "bf16": use_bf16,
+        "fp16": use_fp16,
+        "gradient_checkpointing": True,
+        "max_length": args.max_length,
+        "packing": False,
+        "completion_only_loss": True,
+        "report_to": args.report_to,
+        "remove_unused_columns": True,
+        "save_strategy": "steps",
+    }
+
+    # TRL/Transformers changed this name across versions.
+    sig = inspect.signature(SFTConfig.__init__).parameters
+    if "eval_strategy" in sig:
+        kwargs["eval_strategy"] = "steps"
+    else:
+        kwargs["evaluation_strategy"] = "steps"
+
+    # Optional across versions.
+    if "save_safetensors" in sig:
+        kwargs["save_safetensors"] = True
+
+    # Keep only kwargs supported by this installed TRL version.
+    return {k: v for k, v in kwargs.items() if k in sig}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_jsonl", type=Path, required=True)
@@ -99,7 +148,7 @@ def main() -> None:
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto" if torch.cuda.is_available() else None,
     )
     model.config.use_cache = False
@@ -130,47 +179,20 @@ def main() -> None:
     if args.max_eval_samples > 0:
         eval_ds = eval_ds.select(range(min(args.max_eval_samples, len(eval_ds))))
 
-    training_args = SFTConfig(
-        output_dir=str(args.output_dir),
-        run_name=args.run_name,
-        logging_dir=str(logging_dir),
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        logging_steps=args.logging_steps,
-        logging_first_step=True,
-        eval_strategy="steps",
-        eval_steps=args.eval_steps,
-        save_strategy="steps",
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        save_safetensors=True,
-        load_best_model_at_end=args.load_best_model_at_end,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        seed=args.seed,
-        bf16=use_bf16,
-        fp16=use_fp16,
-        gradient_checkpointing=True,
-        max_length=args.max_length,
-        packing=False,
-        completion_only_loss=True,
-        report_to=args.report_to,
-        remove_unused_columns=True,
-    )
+    training_args = SFTConfig(**build_sft_config_kwargs(args, logging_dir, use_bf16, use_fp16))
 
-    trainer = SFTTrainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_ds,
-        eval_dataset=eval_ds,
-        processing_class=tokenizer,
-        peft_config=peft_config,
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_ds,
+        "eval_dataset": eval_ds,
+        "peft_config": peft_config,
+    }
+    try:
+        trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
+    except TypeError:
+        # Older TRL uses tokenizer=... instead of processing_class=...
+        trainer = SFTTrainer(tokenizer=tokenizer, **trainer_kwargs)
 
     print(f"train rows: {len(train_ds)}")
     print(f"eval rows : {len(eval_ds)}")
