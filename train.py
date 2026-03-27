@@ -99,6 +99,43 @@ def build_sft_config_kwargs(args, logging_dir: Path, use_bf16: bool, use_fp16: b
     return {k: v for k, v in kwargs.items() if k in sig}
 
 
+def make_sft_formatting_func(tokenizer):
+    """
+    Qwen Instruct (and similar) must use apply_chat_template; otherwise TRL sees a mismatch
+    between tokenize(prompt) and tokenize(prompt+completion) under completion_only_loss.
+    """
+
+    def formatting_func(examples: dict):
+        prompts = examples["prompt"]
+        completions = examples["completion"]
+        if isinstance(prompts, str):
+            messages = [
+                {"role": "user", "content": prompts},
+                {"role": "assistant", "content": completions},
+            ]
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+        out = []
+        for p, c in zip(prompts, completions):
+            messages = [
+                {"role": "user", "content": p},
+                {"role": "assistant", "content": c},
+            ]
+            out.append(
+                tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+            )
+        return out
+
+    return formatting_func
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--train_jsonl", type=Path, required=True)
@@ -179,7 +216,18 @@ def main() -> None:
     if args.max_eval_samples > 0:
         eval_ds = eval_ds.select(range(min(args.max_eval_samples, len(eval_ds))))
 
-    training_args = SFTConfig(**build_sft_config_kwargs(args, logging_dir, use_bf16, use_fp16))
+    sft_trainer_sig = inspect.signature(SFTTrainer.__init__).parameters
+    training_kwargs = build_sft_config_kwargs(args, logging_dir, use_bf16, use_fp16)
+    if "formatting_func" not in sft_trainer_sig:
+        print(
+            "WARNING: SFTTrainer has no formatting_func; "
+            "disabling completion_only_loss. Upgrade trl for proper Qwen-Instruct masking.",
+            flush=True,
+        )
+        sig_cfg = inspect.signature(SFTConfig.__init__).parameters
+        if "completion_only_loss" in sig_cfg:
+            training_kwargs["completion_only_loss"] = False
+    training_args = SFTConfig(**training_kwargs)
 
     trainer_kwargs = {
         "model": model,
@@ -188,6 +236,9 @@ def main() -> None:
         "eval_dataset": eval_ds,
         "peft_config": peft_config,
     }
+    if "formatting_func" in sft_trainer_sig:
+        trainer_kwargs["formatting_func"] = make_sft_formatting_func(tokenizer)
+
     try:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
     except TypeError:

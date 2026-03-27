@@ -126,6 +126,12 @@ def main() -> None:
         action="store_true",
         help="Run svg_canonicalizer after extract (optional; usually do this in post-process).",
     )
+    ap.add_argument(
+        "--legacy_plain_prompt",
+        action="store_true",
+        help="Tokenize prompts as raw strings (matches old train.py before chat template). "
+        "Omit this for Qwen-Instruct models trained with current train.py (chat formatting).",
+    )
     ap.add_argument("--limit", type=int, default=0, help="Only first N examples.")
     ap.add_argument(
         "--num_shards",
@@ -187,7 +193,10 @@ def main() -> None:
             log(f"Using temperature={temperature} for diverse candidates.")
 
     log("=== start ===")
-    log("Prompts in test.jsonl must match training (instruction + 'SVG:' tail).")
+    if args.legacy_plain_prompt:
+        log("Prompts: legacy plain strings (must match how the adapter was trained).")
+    else:
+        log("Prompts: Qwen chat template (user message only); match train.py + jsonl text.")
     log(f"num_candidates={args.num_candidates} max_new_tokens={args.max_new_tokens} do_sample={do_sample}")
     log(f"adapter_dir={args.adapter_dir} test_jsonl={args.test_jsonl}")
     if candidates_path:
@@ -243,6 +252,20 @@ def main() -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
 
+    def format_prompts_for_inference(raw_prompts: list[str]) -> list[str]:
+        if args.legacy_plain_prompt:
+            return raw_prompts
+        out = []
+        for p in raw_prompts:
+            out.append(
+                tok.apply_chat_template(
+                    [{"role": "user", "content": p}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+        return out
+
     base = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         dtype=dtype,
@@ -287,7 +310,8 @@ def main() -> None:
             nonlocal last_cand_log_milestone
             if not rows:
                 return
-            prompts = [r["prompt"] for r in rows]
+            raw_prompts = [r["prompt"] for r in rows]
+            prompts = format_prompts_for_inference(raw_prompts)
             batch_t0 = time.time()
             for k in range(args.num_candidates):
                 k_t0 = time.time()
