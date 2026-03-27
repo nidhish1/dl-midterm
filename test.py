@@ -252,6 +252,10 @@ def main() -> None:
     model.eval()
     dev = next(model.parameters()).device
     log(f"model device={dev}")
+    log(
+        "Inference starting: first [submission] log line appears after the first generate() batch "
+        f"(batch_size={args.batch_size}, max_new_tokens={args.max_new_tokens}; often a few minutes)."
+    )
 
     total = 0
     wrote_csv = 0
@@ -346,6 +350,16 @@ def main() -> None:
             if cand_file:
                 cand_file.flush()
 
+            if args.num_candidates == 1 and csv_writer is not None:
+                elapsed = time.time() - start
+                small_run = n_prompts_target <= 2500
+                if small_run or wrote_csv % 1000 == 0 or wrote_csv >= n_prompts_target:
+                    log(
+                        f"[submission] csv_rows={wrote_csv}/{n_prompts_target} "
+                        f"rows/s={wrote_csv / max(elapsed, 1e-6):.2f} "
+                        f"last_batch_size={len(rows)} last_batch_sec={time.time() - batch_t0:.2f}"
+                    )
+
             if args.num_candidates > 1 and cand_file is not None:
                 elapsed = time.time() - start
                 exp = n_prompts_target * args.num_candidates
@@ -370,11 +384,6 @@ def main() -> None:
             if len(batch) >= args.batch_size:
                 flush_batch(batch)
                 batch = []
-                if wrote_csv and wrote_csv % 1000 == 0 and args.num_candidates == 1:
-                    log(
-                        f"[submission] csv_rows={wrote_csv}/{n_prompts_target} "
-                        f"rows/s={wrote_csv / max(time.time() - start, 1e-6):.2f}"
-                    )
 
         flush_batch(batch)
         f_in.close()
