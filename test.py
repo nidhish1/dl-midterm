@@ -1,5 +1,5 @@
 """
-Inference from test.jsonl (prompts must match SFT: same PROMPT_TEMPLATE ending with SVG:).
+Inference from test.jsonl (prompt text must match training: template vs raw vs chat-wrapped).
 
 Training used max_length=4096 for prompt+completion *together*. At inference, `max_new_tokens`
 is only the *new* completion; you can set it high (e.g. 2048) if SVGs are long.
@@ -31,10 +31,22 @@ def extract_svg(text: str) -> str:
     return FALLBACK_SVG
 
 
-def postprocess_svg(raw: str, canonicalize: bool) -> tuple[str, str]:
+def postprocess_svg(raw: str, canonicalize: bool, notebook_svg_post: bool = False) -> tuple[str, str]:
     svg = extract_svg(raw)
     if svg == FALLBACK_SVG:
         return FALLBACK_SVG, "extract_fallback"
+
+    if notebook_svg_post:
+        from util.notebook_svg_constraints import (
+            NOTEBOOK_PLACEHOLDER_SVG,
+            enforce_svg_constraints,
+            is_valid_svg,
+        )
+
+        svg = enforce_svg_constraints(svg)
+        if not is_valid_svg(svg):
+            return NOTEBOOK_PLACEHOLDER_SVG, "notebook_placeholder"
+        return svg, "ok"
 
     if not canonicalize:
         return svg, "ok"
@@ -132,6 +144,12 @@ def main() -> None:
         help="Tokenize prompts as raw strings (matches old train.py before chat template). "
         "Omit this for Qwen-Instruct models trained with current train.py (chat formatting).",
     )
+    ap.add_argument(
+        "--notebook_svg_post",
+        action="store_true",
+        help="After <svg> extract: apply highestnotebook-style enforce (256/8k/paths); "
+        "if invalid, use the notebook's green-circle placeholder SVG.",
+    )
     ap.add_argument("--limit", type=int, default=0, help="Only first N examples.")
     ap.add_argument(
         "--num_shards",
@@ -198,6 +216,10 @@ def main() -> None:
     else:
         log("Prompts: Qwen chat template (user message only); match train.py + jsonl text.")
     log(f"num_candidates={args.num_candidates} max_new_tokens={args.max_new_tokens} do_sample={do_sample}")
+    if args.notebook_svg_post:
+        log("notebook_svg_post=True (256/8k/path rules + notebook placeholder on invalid).")
+    if args.canonicalize and args.notebook_svg_post:
+        log("note: --notebook_svg_post runs instead of --canonicalize per row.")
     log(f"adapter_dir={args.adapter_dir} test_jsonl={args.test_jsonl}")
     if candidates_path:
         log(f"candidates_out={candidates_path}")
@@ -286,6 +308,7 @@ def main() -> None:
     prompts_flushed = 0
     n_extract_fallback = 0
     n_canon_fallback = 0
+    n_notebook_placeholder = 0
     start = time.time()
     last_cand_log_milestone = 0
 
@@ -306,7 +329,8 @@ def main() -> None:
         batch: list[dict] = []
 
         def flush_batch(rows: list[dict]) -> None:
-            nonlocal wrote_csv, wrote_cand, prompts_flushed, n_extract_fallback, n_canon_fallback
+            nonlocal wrote_csv, wrote_cand, prompts_flushed
+            nonlocal n_extract_fallback, n_canon_fallback, n_notebook_placeholder
             nonlocal last_cand_log_milestone
             if not rows:
                 return
@@ -326,11 +350,13 @@ def main() -> None:
                     top_p,
                 )
                 for r, c in zip(rows, comps):
-                    svg, reason = postprocess_svg(c, args.canonicalize)
+                    svg, reason = postprocess_svg(c, args.canonicalize, args.notebook_svg_post)
                     if reason == "extract_fallback":
                         n_extract_fallback += 1
                     elif reason == "canon_fallback":
                         n_canon_fallback += 1
+                    elif reason == "notebook_placeholder":
+                        n_notebook_placeholder += 1
 
                     if cand_file is not None:
                         cand_file.write(
@@ -355,7 +381,8 @@ def main() -> None:
                                 f"[candidates] lines={wrote_cand}/{exp} ({pct:.1f}%) "
                                 f"lines/s={wrote_cand / max(elapsed, 1e-6):.2f} "
                                 f"prompts_done~={wrote_cand // max(args.num_candidates, 1)}/{n_prompts_target} "
-                                f"extract_fb={n_extract_fallback} canon_fb={n_canon_fallback}"
+                                f"extract_fb={n_extract_fallback} canon_fb={n_canon_fallback} "
+                                f"nb_placeholder={n_notebook_placeholder}"
                             )
 
                     if args.num_candidates == 1 and csv_writer is not None and k == 0:
@@ -426,6 +453,7 @@ def main() -> None:
         f"examples_read={total} prompts_target={n_prompts_target} "
         f"csv_rows={wrote_csv} candidate_lines={wrote_cand} expected_lines={exp_cand} "
         f"extract_fallback={n_extract_fallback} canon_fallback={n_canon_fallback} "
+        f"notebook_placeholder={n_notebook_placeholder} "
         f"sec={elapsed:.1f} throughput_lines_or_rows_per_sec={rate:.2f}"
     )
 

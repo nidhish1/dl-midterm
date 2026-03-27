@@ -38,6 +38,8 @@ chmod +x bootstrap_h100.sh
 
 ## Before your next training run (fix data — no GPU time)
 
+Step-by-step **notebook-aligned Qwen experiment** (data → train → infer → what differs from the ipynb): see [`experiments/notebook_aligned.md`](experiments/notebook_aligned.md).
+
 High-scoring **`highestnotebook.ipynb`** uses **short prompts** (`test.csv` / `train.csv` text only) and **notebook-style SVG targets** (`viewBox="0 0 256 256"`, **8k** char cap, strip script). The default repo pipeline used a **long prompt template** and often **full `svg_canonicalizer`**, which is a different distribution.
 
 1. **Rebuild JSONL** with aligned prompts and (optionally) notebook-style completions:

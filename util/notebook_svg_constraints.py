@@ -29,6 +29,16 @@ def enforce_svg_constraints(svg: str) -> str:
     return svg
 
 
+# Same fallback SVG as highestnotebook.ipynb when enforce + validation fail.
+NOTEBOOK_PLACEHOLDER_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">'
+    '<rect width="256" height="256" fill="#F5F5F5"/>'
+    '<circle cx="128" cy="128" r="80" fill="#4CAF50"/>'
+    '<text x="128" y="200" text-anchor="middle" fill="#333" font-size="14">Generated</text>'
+    "</svg>"
+)
+
+
 def is_valid_svg(svg: str) -> bool:
     if not svg:
         return False

@@ -78,7 +78,9 @@ def build_sft_config_kwargs(args, logging_dir: Path, use_bf16: bool, use_fp16: b
         "gradient_checkpointing": True,
         "max_length": args.max_length,
         "packing": False,
-        "completion_only_loss": True,
+        # Must be False for Qwen chat_template + prompt/completion JSONL: TRL's completion-only
+        # path tokenizes "prompt" as plain text and disagrees with chat-formatted full sequence.
+        "completion_only_loss": args.completion_only_loss,
         "report_to": args.report_to,
         "remove_unused_columns": True,
         "save_strategy": "steps",
@@ -99,41 +101,33 @@ def build_sft_config_kwargs(args, logging_dir: Path, use_bf16: bool, use_fp16: b
     return {k: v for k, v in kwargs.items() if k in sig}
 
 
-def make_sft_formatting_func(tokenizer):
-    """
-    Qwen Instruct (and similar) must use apply_chat_template; otherwise TRL sees a mismatch
-    between tokenize(prompt) and tokenize(prompt+completion) under completion_only_loss.
-    """
+def dataset_add_chat_text_column(ds, tokenizer, num_proc: int | None = None):
+    """Single column `text` = apply_chat_template(user, assistant). Drops all original columns."""
 
-    def formatting_func(examples: dict):
-        prompts = examples["prompt"]
-        completions = examples["completion"]
-        if isinstance(prompts, str):
+    def to_text(batch: dict) -> dict:
+        texts = []
+        for prompt, completion in zip(batch["prompt"], batch["completion"], strict=True):
             messages = [
-                {"role": "user", "content": prompts},
-                {"role": "assistant", "content": completions},
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": completion},
             ]
-            return tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        out = []
-        for p, c in zip(prompts, completions):
-            messages = [
-                {"role": "user", "content": p},
-                {"role": "assistant", "content": c},
-            ]
-            out.append(
+            texts.append(
                 tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
                     add_generation_prompt=False,
                 )
             )
-        return out
+        return {"text": texts}
 
-    return formatting_func
+    map_kwargs: dict = {
+        "batched": True,
+        "remove_columns": list(ds.column_names),
+        "desc": "chat_template text",
+    }
+    if num_proc is not None and num_proc > 1:
+        map_kwargs["num_proc"] = num_proc
+    return ds.map(to_text, **map_kwargs)
 
 
 def main() -> None:
@@ -169,6 +163,17 @@ def main() -> None:
 
     parser.add_argument("--max_train_samples", type=int, default=0)
     parser.add_argument("--max_eval_samples", type=int, default=0)
+    parser.add_argument(
+        "--completion_only_loss",
+        action="store_true",
+        help="Mask loss to assistant only (often breaks with Qwen+JSONL in TRL). Default: full-sequence loss on chat-formatted text.",
+    )
+    parser.add_argument(
+        "--dataset_map_num_proc",
+        type=int,
+        default=1,
+        help="Parallel workers for chat preprocessing map. 0 or 1 = sequential (safest); >1 enables multiprocessing.",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -216,17 +221,22 @@ def main() -> None:
     if args.max_eval_samples > 0:
         eval_ds = eval_ds.select(range(min(args.max_eval_samples, len(eval_ds))))
 
+    map_mp = args.dataset_map_num_proc if args.dataset_map_num_proc > 1 else None
+    train_ds = dataset_add_chat_text_column(train_ds, tokenizer, num_proc=map_mp)
+    eval_ds = dataset_add_chat_text_column(eval_ds, tokenizer, num_proc=map_mp)
+
     sft_trainer_sig = inspect.signature(SFTTrainer.__init__).parameters
+    sft_config_sig = inspect.signature(SFTConfig.__init__).parameters
     training_kwargs = build_sft_config_kwargs(args, logging_dir, use_bf16, use_fp16)
-    if "formatting_func" not in sft_trainer_sig:
+    if args.completion_only_loss:
         print(
-            "WARNING: SFTTrainer has no formatting_func; "
-            "disabling completion_only_loss. Upgrade trl for proper Qwen-Instruct masking.",
+            "WARNING: --completion_only_loss can trigger TRL token mismatch on Qwen; "
+            "prefer default (full-sequence loss on chat text).",
             flush=True,
         )
-        sig_cfg = inspect.signature(SFTConfig.__init__).parameters
-        if "completion_only_loss" in sig_cfg:
-            training_kwargs["completion_only_loss"] = False
+
+    if "dataset_text_field" in sft_config_sig:
+        training_kwargs["dataset_text_field"] = "text"
     training_args = SFTConfig(**training_kwargs)
 
     trainer_kwargs = {
@@ -236,8 +246,8 @@ def main() -> None:
         "eval_dataset": eval_ds,
         "peft_config": peft_config,
     }
-    if "formatting_func" in sft_trainer_sig:
-        trainer_kwargs["formatting_func"] = make_sft_formatting_func(tokenizer)
+    if "dataset_text_field" in sft_trainer_sig:
+        trainer_kwargs["dataset_text_field"] = "text"
 
     try:
         trainer = SFTTrainer(processing_class=tokenizer, **trainer_kwargs)
